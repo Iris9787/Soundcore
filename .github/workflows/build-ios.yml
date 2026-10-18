@@ -1,0 +1,55 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-ios:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -z "$XCODE" ] && XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Pod install
+        run: cd ios && pod install --repo-update
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Package IPA
+        run: |
+          APP=$(ls -d build/ios/iphoneos/*.app | head -1)
+          echo "App: $APP"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Soundcore-unsigned.ipa Payload
+          ls -la Soundcore-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Soundcore-unsigned-ipa
+          path: Soundcore-unsigned.ipa
+          retention-days: 30
