@@ -70,6 +70,10 @@ class AppSettings {
     this.translationTargetLanguage = 'zh',
     this.ownerLanguage = 'zh',
     this.guestLanguage = 'en',
+    this.assistantWebhookEnabled = false,
+    this.assistantWebhookUrl = '',
+    this.assistantWebhookSecret = '',
+    this.assistantWebhookHeader = 'Authorization',
   });
 
   final String? sonioxApiKey;
@@ -85,6 +89,12 @@ class AppSettings {
   final String translationTargetLanguage;
   final String ownerLanguage;
   final String guestLanguage;
+
+  /// Auto-send finished transcripts to the user's assistant webhook.
+  final bool assistantWebhookEnabled;
+  final String assistantWebhookUrl;
+  final String assistantWebhookSecret;
+  final String assistantWebhookHeader;
 
   AppSettings copyWith({
     SttProvider? speechProvider,
@@ -130,6 +140,12 @@ class AppSettings {
     'translationTargetLanguage': translationTargetLanguage,
     'ownerLanguage': ownerLanguage,
     'guestLanguage': guestLanguage,
+    'assistantWebhookEnabled': assistantWebhookEnabled,
+    if (assistantWebhookUrl.isNotEmpty)
+      'assistantWebhookUrl': assistantWebhookUrl,
+    if (assistantWebhookSecret.isNotEmpty)
+      'assistantWebhookSecret': assistantWebhookSecret,
+    'assistantWebhookHeader': assistantWebhookHeader,
   };
 
   factory AppSettings.fromJson(Map<String, dynamic> map) {
@@ -158,6 +174,11 @@ class AppSettings {
       translationTargetLanguage: _str(map['translationTargetLanguage']) ?? 'zh',
       ownerLanguage: ownerLanguage,
       guestLanguage: guestLanguage,
+      assistantWebhookEnabled: map['assistantWebhookEnabled'] == true,
+      assistantWebhookUrl: _str(map['assistantWebhookUrl']) ?? '',
+      assistantWebhookSecret: _str(map['assistantWebhookSecret']) ?? '',
+      assistantWebhookHeader:
+          _str(map['assistantWebhookHeader']) ?? 'Authorization',
     );
   }
 

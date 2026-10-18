@@ -135,6 +135,21 @@ class _ConnectionHeader extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
+                if (c.assistantStatusLine != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    c.assistantStatusLine!,
+                    key: const ValueKey('assistant-status-line'),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: c.assistantFailedCount > 0
+                          ? AppColors.coral
+                          : AppColors.textSecondary,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
               ],
             ),
           ),

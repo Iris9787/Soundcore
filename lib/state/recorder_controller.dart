@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../ai/soniox_stt.dart';
+import '../assistant/assistant_webhook.dart';
 import '../ai/moss_stt.dart';
 import '../ai/soniox_stt_stream.dart';
 import '../ai/soniox_languages.dart';
@@ -39,6 +40,9 @@ export 'recording.dart';
 export '../ai/speech_provider.dart';
 
 enum AppPhase { idle, scanning, connecting, ready, busy }
+
+/// How a stored transcript participates in auto-send to the assistant.
+enum AssistantSend { never, ifChanged, force }
 
 class RecorderController extends ChangeNotifier {
   static const _bleScanTimeout = Duration(seconds: 30);
@@ -187,6 +191,16 @@ class RecorderController extends ChangeNotifier {
     );
     _subs.add(_realtime.stateStream.listen(_onRealtimeState));
     _wirePlayer();
+    _assistant = AssistantWebhookService(
+      config: () => assistantWebhook,
+      inMemory: !loadPersistedState,
+      isBusy: _assistantRecordingBusy,
+      resolvePath: _assistantPathForKey,
+      readDuration: AudioDuration.read,
+      onChanged: () {
+        if (!_disposed) notifyListeners();
+      },
+    );
     _mossJobs = MossJobQueue(
       service: _mossStt,
       store: mossJobStore ?? MossJobStore(inMemory: !loadPersistedState),
@@ -205,6 +219,7 @@ class RecorderController extends ChangeNotifier {
           result.text,
           provider: SttProvider.moss,
           sourceLanguage: result.language ?? 'auto',
+          sendToAssistant: AssistantSend.force,
         );
         await _persistTranscripts(strict: true);
         final session = _sessionForReference(RecordingReference(path: path));
@@ -219,6 +234,13 @@ class RecorderController extends ChangeNotifier {
         ? _loadPersistedSettings().whenComplete(() => _settingsReady = true)
         : Future<void>.value();
     if (loadPersistedState) {
+      unawaited(_assistant.load());
+      unawaited(
+        Future.wait([
+          _settingsLoaded,
+          _assistant.load(),
+        ]).then((_) => _assistant.flush()),
+      );
       unawaited(_settingsLoaded);
       unawaited(_loadLocalExports());
       _transcriptsLoaded = _loadPersistedTranscripts();
@@ -293,6 +315,12 @@ class RecorderController extends ChangeNotifier {
     final s = await AppSettingsStore.load();
     if (s.sonioxApiKey != null) _sonioxStt.apiKeyOverride = s.sonioxApiKey;
     _mossStt.apiKeyOverride = s.mossApiKey;
+    assistantWebhook = AssistantWebhookConfig(
+      enabled: s.assistantWebhookEnabled,
+      url: s.assistantWebhookUrl,
+      secret: s.assistantWebhookSecret,
+      headerName: s.assistantWebhookHeader,
+    );
     autoTranscribe = s.autoTranscribe;
     autoRealtime = s.autoRealtime;
     transcriptLanguage = s.transcriptLanguage;
@@ -339,8 +367,102 @@ class RecorderController extends ChangeNotifier {
         translationTargetLanguage: translationTargetLanguage,
         ownerLanguage: ownerLanguage,
         guestLanguage: guestLanguage,
+        assistantWebhookEnabled: assistantWebhook.enabled,
+        assistantWebhookUrl: assistantWebhook.url,
+        assistantWebhookSecret: assistantWebhook.secret,
+        assistantWebhookHeader: assistantWebhook.headerName,
       ),
       strict: strict,
+    );
+  }
+
+  // ── Auto-send to assistant ──────────────────────────────────────────────
+
+  AssistantWebhookConfig assistantWebhook = const AssistantWebhookConfig();
+  late final AssistantWebhookService _assistant;
+  final Map<String, String> _assistantPaths = {};
+
+  int get assistantSentCount => _assistant.sentCount;
+  int get assistantFailedCount => _assistant.failedCount;
+
+  /// Small header line, e.g. 「已自动发送给助理 2 条」; null when idle/off.
+  String? get assistantStatusLine {
+    if (!assistantWebhook.enabled) return null;
+    final failed = _assistant.failedCount;
+    if (failed > 0) return '发送给助理失败 $failed 条，待重试';
+    final sent = _assistant.sentCount;
+    if (sent > 0) return '已自动发送给助理 $sent 条';
+    return null;
+  }
+
+  Future<void> saveAssistantWebhook(AssistantWebhookConfig config) async {
+    assistantWebhook = AssistantWebhookConfig(
+      enabled: config.enabled,
+      url: config.url.trim(),
+      secret: config.secret.trim(),
+      headerName: config.headerName.trim().isEmpty
+          ? AssistantWebhookConfig.defaultHeaderName
+          : config.headerName.trim(),
+    );
+    notifyListeners();
+    await _persistSettings();
+    unawaited(_assistant.flush());
+  }
+
+  Future<String> sendAssistantTest(AssistantWebhookConfig config) =>
+      _assistant.sendTest(config);
+
+  String? _assistantPathForKey(String key) {
+    final id = key.startsWith('file:') ? int.tryParse(key.substring(5)) : null;
+    if (id != null) {
+      final path = recordingView(RecordingReference(fileId: id)).path;
+      if (path != null && path.isNotEmpty) return path;
+    }
+    return _assistantPaths[key];
+  }
+
+  bool _assistantRecordingBusy(String key) {
+    final current = _currentRecording;
+    if (current != null &&
+        _recordingKey(fileId: current.fileId, path: current.path) == key &&
+        (current.active || current.finalizing || recording)) {
+      return true;
+    }
+    return _finalizingRecordings.contains(key) ||
+        _fileJobKey == key ||
+        _mossJobs.active?.recordingKey == key;
+  }
+
+  void _queueAssistantSend(
+    String path,
+    String text,
+    String? sourceLanguage, {
+    required bool force,
+  }) {
+    if (!assistantWebhook.enabled || text.trim().isEmpty) return;
+    final key = _recordingKey(path: path);
+    _assistantPaths[key] = path;
+    final id = fileIdFromPath(path);
+    final title = recordingView(RecordingReference(path: path)).title;
+    final language =
+        sourceLanguage == null ||
+            sourceLanguage.isEmpty ||
+            sourceLanguage == 'auto'
+        ? null
+        : sourceLanguage;
+    unawaited(
+      _assistant.enqueue(
+        recordingKey: key,
+        recordingId: id?.toString() ?? key,
+        path: path,
+        title: title,
+        transcript: text,
+        recordedAt: id == null
+            ? DateTime.now()
+            : DateTime.fromMillisecondsSinceEpoch(id * 1000),
+        language: language,
+        force: force,
+      ),
     );
   }
 
@@ -1029,6 +1151,7 @@ class RecorderController extends ChangeNotifier {
     String text, {
     SttProvider? provider,
     String? sourceLanguage,
+    AssistantSend sendToAssistant = AssistantSend.ifChanged,
   }) {
     final t = normalizeSttText(text);
     if (path.isEmpty || t.isEmpty) return;
@@ -1053,6 +1176,14 @@ class RecorderController extends ChangeNotifier {
     final id = fileIdFromPath(path);
     if (id != null) transcriptsByFileId[id] = t;
     unawaited(_persistTranscripts());
+    if (sendToAssistant != AssistantSend.never) {
+      _queueAssistantSend(
+        path,
+        t,
+        sourceLanguage ?? metadata?.sourceLanguage,
+        force: sendToAssistant == AssistantSend.force,
+      );
+    }
   }
 
   String? transcriptForPath(String path) {
@@ -1917,6 +2048,7 @@ class RecorderController extends ChangeNotifier {
           sourceLanguage: config.provider == SttProvider.apple
               ? config.sourceLanguage
               : result.language ?? config.sourceLanguage,
+          sendToAssistant: AssistantSend.force,
         );
         statusMessage = '转写已保存';
         // Refresh a closed live route without retaining an obsolete error.
@@ -4395,6 +4527,7 @@ class RecorderController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _assistant.dispose();
     _completeFileRefresh();
     _fileJobRevision++;
     _capabilityRevision++;

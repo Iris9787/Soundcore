@@ -5,6 +5,7 @@ import '../../ai/stt_types.dart';
 import '../../ai/moss_stt.dart';
 import '../../ai/apple_speech.dart';
 import '../../ai/soniox_languages.dart';
+import '../../assistant/assistant_webhook.dart';
 import '../../state/recorder_controller.dart';
 import '../../theme/app_theme.dart';
 import '../widgets/widgets.dart';
@@ -93,9 +94,204 @@ class SettingsScreen extends StatelessWidget {
                 ],
               ),
             ),
+            const SizedBox(height: 18),
+            const SectionLabel('自动发送给助理'),
+            _SettingsGroup(
+              key: const ValueKey('settings-assistant-group'),
+              child: _AssistantWebhookSettings(controller: c),
+            ),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _AssistantWebhookSettings extends StatefulWidget {
+  const _AssistantWebhookSettings({required this.controller});
+  final RecorderController controller;
+
+  @override
+  State<_AssistantWebhookSettings> createState() =>
+      _AssistantWebhookSettingsState();
+}
+
+class _AssistantWebhookSettingsState extends State<_AssistantWebhookSettings> {
+  late final TextEditingController _url;
+  late final TextEditingController _secret;
+  late final TextEditingController _header;
+  bool _dirty = false;
+  bool _testing = false;
+  String? _message;
+
+  @override
+  void initState() {
+    super.initState();
+    final config = widget.controller.assistantWebhook;
+    _url = TextEditingController(text: config.url);
+    _secret = TextEditingController(text: config.secret);
+    _header = TextEditingController(text: config.headerName);
+  }
+
+  @override
+  void didUpdateWidget(covariant _AssistantWebhookSettings oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_dirty) return;
+    // Settings load asynchronously; reflect them while the user is not editing.
+    final config = widget.controller.assistantWebhook;
+    if (_url.text != config.url) _url.text = config.url;
+    if (_secret.text != config.secret) _secret.text = config.secret;
+    if (_header.text != config.headerName) _header.text = config.headerName;
+  }
+
+  @override
+  void dispose() {
+    _url.dispose();
+    _secret.dispose();
+    _header.dispose();
+    super.dispose();
+  }
+
+  AssistantWebhookConfig _draft({bool? enabled}) => AssistantWebhookConfig(
+    enabled: enabled ?? widget.controller.assistantWebhook.enabled,
+    url: _url.text.trim(),
+    secret: _secret.text.trim(),
+    headerName: _header.text.trim().isEmpty
+        ? AssistantWebhookConfig.defaultHeaderName
+        : _header.text.trim(),
+  );
+
+  Future<void> _save({bool? enabled, bool announce = true}) async {
+    final draft = _draft(enabled: enabled);
+    if (draft.enabled && draft.url.isNotEmpty && draft.uri == null) {
+      setState(() => _message = '请填写有效的 Webhook URL（https://…）');
+      return;
+    }
+    await widget.controller.saveAssistantWebhook(draft);
+    if (!mounted) return;
+    setState(() {
+      _dirty = false;
+      if (announce) _message = '已保存';
+    });
+  }
+
+  Future<void> _test() async {
+    if (_testing) return;
+    setState(() {
+      _testing = true;
+      _message = null;
+    });
+    final draft = _draft();
+    if (draft.uri != null) await _save(announce: false);
+    final result = await widget.controller.sendAssistantTest(draft);
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _message = result;
+    });
+  }
+
+  InputDecoration _decoration(String label, {String? hint, String? helper}) =>
+      InputDecoration(
+        labelText: label,
+        hintText: hint,
+        helperText: helper,
+        helperMaxLines: 2,
+        isDense: true,
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.controller;
+    final enabled = c.assistantWebhook.enabled;
+    final status = c.assistantStatusLine;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _SettingsSwitch(
+          title: '自动发送给助理',
+          subtitle: '每条录音转写完成后，把文字自动发送到下面的 Webhook',
+          value: enabled,
+          onChanged: (value) => _save(enabled: value, announce: false),
+        ),
+        const SizedBox(height: 14),
+        TextField(
+          key: const ValueKey('assistant-webhook-url'),
+          controller: _url,
+          keyboardType: TextInputType.url,
+          autocorrect: false,
+          enableSuggestions: false,
+          onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+          decoration: _decoration('Webhook URL', hint: 'https://…'),
+          onChanged: (_) {
+            if (!_dirty) setState(() => _dirty = true);
+          },
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          key: const ValueKey('assistant-webhook-secret'),
+          controller: _secret,
+          obscureText: true,
+          autocorrect: false,
+          enableSuggestions: false,
+          onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+          decoration: _decoration('发送密钥', hint: '粘贴密钥…'),
+          onChanged: (_) {
+            if (!_dirty) setState(() => _dirty = true);
+          },
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          key: const ValueKey('assistant-webhook-header'),
+          controller: _header,
+          autocorrect: false,
+          enableSuggestions: false,
+          onTapOutside: (_) => FocusManager.instance.primaryFocus?.unfocus(),
+          decoration: _decoration(
+            '密钥请求头',
+            hint: 'Authorization',
+            helper: '填 Authorization 时发送「Bearer 密钥」，填其他名称时直接发送密钥',
+          ),
+          onChanged: (_) {
+            if (!_dirty) setState(() => _dirty = true);
+          },
+        ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            OutlinedButton.icon(
+              key: const ValueKey('assistant-webhook-test'),
+              onPressed: _testing ? null : _test,
+              icon: _testing
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.send_rounded, size: 18),
+              label: Text(_testing ? '发送中…' : '发送测试'),
+            ),
+            const SizedBox(width: 10),
+            FilledButton.icon(
+              key: const ValueKey('assistant-webhook-save'),
+              onPressed: _dirty ? () => _save() : null,
+              icon: const Icon(Icons.save_rounded, size: 18),
+              label: const Text('保存'),
+            ),
+          ],
+        ),
+        if (_message != null || status != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            _message ?? status!,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
